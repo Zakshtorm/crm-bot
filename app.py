@@ -1,38 +1,56 @@
-from flask import Flask, render_template, request, redirect, url_for, session
-from models import session as db_session, Message
-import random
+import os
+from flask import Flask, request, render_template, redirect, url_for, flash
+from werkzeug.utils import secure_filename
+from openpyxl import load_workbook
+from models import session as db_session, Order  # модель ниже покажу
 
-app = Flask(__name__)
-app.secret_key = 'secret_key_for_sessions'  # можешь заменить на свой ключ
+UPLOAD_FOLDER = 'uploads'
+ALLOWED_EXTENSIONS = {'xlsx'}
 
-# --- Главная страница CRM ---
-@app.route("/")
-def index():
-    if 'logged_in' not in session:
-        return redirect(url_for('login'))
-    messages = db_session.query(Message).order_by(Message.timestamp.desc()).all()
-    return render_template("index.html", messages=messages)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
-# --- Авторизация ---
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    background_id = random.randint(0, 9)  # случайный фон 0–9
-    if request.method == "POST":
-        username = request.form["username"]
-        password = request.form["password"]
-        if username == "admin" and password == "12345":
-            session['logged_in'] = True
-            return redirect(url_for("index"))
-        else:
-            error = "❌ Неверный логин или пароль"
-            return render_template("login.html", error=error, bg_id=background_id)
-    return render_template("login.html", error=None, bg_id=background_id)
 
-# --- Выход ---
-@app.route("/logout")
-def logout():
-    session.pop('logged_in', None)
-    return redirect(url_for("login"))
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
-if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=10000)
+
+@app.route('/upload', methods=['GET', 'POST'])
+def upload_excel():
+    if request.method == 'POST':
+        file = request.files['file']
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+
+            # Чтение Excel
+            wb = load_workbook(filepath)
+            ws = wb.active
+
+            for row in ws.iter_rows(min_row=2):  # начинаем со 2-й строки
+                track_code = row[0].value
+                status = row[1].value
+                flight = row[2].value
+
+                if not track_code or status is None:
+                    continue  # пропускаем пустые строки
+
+                order = db_session.query(Order).filter_by(track_code=track_code).first()
+                if order:
+                    # Обновляем
+                    order.status = status
+                    order.flight = flight
+                else:
+                    # Добавляем новый
+                    new_order = Order(track_code=track_code, status=status, flight=flight)
+                    db_session.add(new_order)
+
+            db_session.commit()
+            flash("Файл успешно обработан!", "success")
+            return redirect(url_for('upload_excel'))
+
+        flash("Неверный формат файла. Загрузите .xlsx", "error")
+    return render_template('upload.html')
+
